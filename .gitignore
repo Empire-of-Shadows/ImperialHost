@@ -379,3 +379,18 @@ desktop.ini
 /healthcheck.py
 /daily/would_you_rather_questions/
 /Database/config_doc.md
+cache
+/.idea/.gitignore
+/commands/games/counting/Counting game Changes
+/commands/games/counting/CountingDocs
+/docker-compose.yml
+/Dockerfile
+/host.sh
+/logs/MasterCache.log.1
+/.idea/misc.xml
+/.idea/modules.xml
+/.idea/inspectionProfiles/profiles_settings.xml
+/commands/games/TicTacToe/TTT_Docs
+/commands/games/TicTacToe/TTT_RoadMap
+/.idea/vcs.xml
+logs
