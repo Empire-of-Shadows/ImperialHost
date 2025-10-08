@@ -4,7 +4,7 @@ from discord.ext import commands
 from discord.ui import Button, View, button
 from typing import cast
 from commands.games.TicTacToe.tictactoegame import make_view, tictactoe_game_manager
-from storage.config_system import config
+from Host import config
 from utilities.logger_setup import get_logger
 
 logger = get_logger("TicTacToeCommandCog")

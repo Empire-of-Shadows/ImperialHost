@@ -1,8 +1,6 @@
 import json
 import os
-import time
-from typing import Any, Dict, List, Set, Type, Optional
-from dataclasses import dataclass
+from typing import Any, Dict, List, Set
 from dotenv import load_dotenv
 import yaml
 
@@ -25,7 +23,7 @@ def format_value_for_logging(value: Any, max_single_line: int = 80) -> str:
         # Convert to pretty JSON
         pretty_json = json.dumps(value, indent=2, ensure_ascii=False)
 
-        # Check if it's small enough for single line
+        # Check if it's small enough for a single line
         compact_str = json.dumps(value, ensure_ascii=False)
         if len(compact_str) <= max_single_line:
             return f" {compact_str}"
