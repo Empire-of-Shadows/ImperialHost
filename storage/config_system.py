@@ -11,7 +11,7 @@ from utilities.logger_setup import get_logger
 
 load_dotenv()
 
-config_dir = "/data"
+config_dir = "/data/config"
 # Initialize logger for this module
 logger = get_logger("config_system")
 
