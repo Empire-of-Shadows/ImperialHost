@@ -3,11 +3,10 @@ import os
 import platform
 import sys
 import time
+from utilities.bot import bot, TOKEN
 
 import discord
-
 from host_startup.startup import load_cogs, log_synced_commands, shutdown, _register_posix_signals
-from utilities.bot import bot, TOKEN
 from utilities.idle import rotate_status
 from utilities.logger_setup import get_logger, log_performance, log_context, PerformanceLogger
 

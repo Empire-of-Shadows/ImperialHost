@@ -7,6 +7,7 @@ from typing import List, Dict, Any
 
 import discord
 from tabulate import tabulate
+
 from utilities.bot import bot
 from utilities.idle import rotate_status
 
