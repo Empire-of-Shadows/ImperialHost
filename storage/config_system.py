@@ -43,7 +43,7 @@ class BotConfig(SettingsValidater, SettingsDefine, SettingsUpdate):
         self._callbacks: List[callable] = []
 
         try:
-            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            os.makedirs(config_path, exist_ok=True)
             logger.debug(f"Ensured config directory exists: {os.path.dirname(config_path)}")
         except Exception as e:
             logger.error(f"Failed to create config directory: {e}", exc_info=True)
