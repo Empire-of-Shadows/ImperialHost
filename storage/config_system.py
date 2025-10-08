@@ -35,7 +35,7 @@ def format_value_for_logging(value: Any, max_single_line: int = 80) -> str:
     return f" {value}"
 
 class BotConfig(SettingsValidater, SettingsDefine, SettingsUpdate):
-    def __init__(self, config_path: str = config_dir):
+    def __init__(self, config_path: str = "/data"):
         logger.info(f"Initializing BotConfig with path: {config_path}")
         self.config_path = config_path
         self._config_definitions: Dict[str, ConfigDefinition] = {}
