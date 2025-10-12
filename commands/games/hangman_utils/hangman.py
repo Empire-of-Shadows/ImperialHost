@@ -11,7 +11,7 @@ from commands.games.hangman_utils.hangman_globals import hangman_games
 from commands.games.hangman_utils.hangman_guess_letter import guess_letter
 from commands.games.hangman_utils.start import hangman_starter
 from commands.games.hangman_utils.check_message import check_message_exists
-from Host import config
+from storage.config_system import config
 from utilities.cooldown import cooldown_enforcer, guess_cd, hangman_start_cd
 from utilities.logger_setup import get_logger
 
