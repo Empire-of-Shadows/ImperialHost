@@ -45,7 +45,7 @@ class HangmanCommandCog(commands.GroupCog, name="hangman"):
             channel_id = interaction.channel_id
 
             # Restrict command to a specific channel
-            allowed_channel_id = 1406642649997508758
+            allowed_channel_id = config.game_lobby_channel_id
             if channel_id != allowed_channel_id:
                 # Prefer a clean ephemeral notice
                 if not interaction.response.is_done():
@@ -65,7 +65,8 @@ class HangmanCommandCog(commands.GroupCog, name="hangman"):
             try:
                 cache = hangman_game_manager._get_cache()
                 if cache:
-                    game_state = await cache.get_state(channel_id)
+                    # Safely probe state: cache-only to avoid DB LookupError for non-existent states
+                    game_state = getattr(cache, "_state_cache", {}).get(channel_id)
                 else:
                     game_state = None
                 if game_state and game_state.get("message_id"):
@@ -83,6 +84,7 @@ class HangmanCommandCog(commands.GroupCog, name="hangman"):
                 pass
             except Exception as e:
                 logger.error(f"Error checking for stale game state: {e}")
+
                 # Continue with game start despite error
 
             # Parse participants into user ids
@@ -123,18 +125,6 @@ class HangmanCommandCog(commands.GroupCog, name="hangman"):
                 return
 
             game_name = f"hangman-{discord.utils.utcnow().strftime('%Y%m%d-%H%M%S')}"
-            try:
-                new_channel = await guild.create_text_channel(
-                    name=game_name,
-                    category=category,
-                    reason="Hangman: New game channel",
-                )
-            except Exception as e:
-                logger.error(f"Failed to create Hangman game channel: {e}")
-                await interaction.response.send_message(
-                    "Failed to create a new game channel. Please try again later.", ephemeral=True
-                )
-                return
 
             # Pick a word: if custom word not provided, set a placeholder/length policy.
             # Here we enforce length only if a custom word is given.
@@ -147,32 +137,48 @@ class HangmanCommandCog(commands.GroupCog, name="hangman"):
                     return
                 chosen_word = word
             else:
-                # Fallback simple word to satisfy start; real selection can be integrated later.
                 chosen_word = "hangman"
 
-            # Start the game in the new channel using HangmanGameManager
+            # Start the game; manager will create the channel and persist state
             try:
-                await hangman_game_manager.start_game(
-                    channel_id=new_channel.id,
+                game = await hangman_game_manager.start_game(
+                    channel_id=0,  # ignored when guild is provided
                     word=chosen_word,
                     max_attempts=6,
                     guild=guild,
-                    game_name=new_channel.name,
+                    game_name=game_name,
                 )
             except Exception as e:
                 logger.error(f"Failed to start Hangman game: {e}")
                 await interaction.response.send_message(
                     "Failed to initialize the game. Please try again later.", ephemeral=True
                 )
-                try:
-                    await new_channel.delete(reason="Hangman: Failed to initialize game")
-                except Exception:
-                    pass
                 return
+
+            # Post initial game message in the created channel
+            try:
+                new_channel = guild.get_channel(game.channel_id) or await self.bot.fetch_channel(game.channel_id)  # type: ignore[attr-defined]
+                if new_channel:
+                    # Build a simple embed with hangman visual
+                    from commands.games.Hangman.hangman_globals import HANGMAN_STAGES  # local import
+                    stage_index = 0
+                    hangman_visual = HANGMAN_STAGES[stage_index]
+                    embed = discord.Embed(
+                        title="Hangman",
+                        description=f"{game.format_board()}\n```\n{hangman_visual}\n```",
+                        color=discord.Color.blue(),
+                    )
+                    msg = await new_channel.send(embed=embed)
+                    game.root_message_id = int(msg.id)
+                    await hangman_game_manager._persist_update(game)
+                else:
+                    logger.warning(f"Could not resolve new hangman channel {game.channel_id} to send initial message")
+            except Exception as e:
+                logger.error(f"Failed to send initial Hangman message in {getattr(game, 'channel_id', 'unknown')}: {e}")
 
             # Acknowledge start
             await interaction.response.send_message(
-                f"Hangman game created: {new_channel.mention}", ephemeral=True
+                f"Hangman game created: <#{game.channel_id}>", ephemeral=True
             )
 
         except Exception as e:
@@ -223,19 +229,11 @@ class HangmanCommandCog(commands.GroupCog, name="hangman"):
                 await interaction.followup.send("You must provide either a letter or a word.", ephemeral=False)
                 return
 
-            # Route guesses through the button/manager mechanics:
-            # If a single character, simulate the guess button path; otherwise, ignore for now.
+            # Use the handler directly; no buttons/views involved
             guess_value = (letter or word).strip()
-            if len(guess_value) == 1:
-                # Use the existing manager flow by creating a temporary button instance
-                from commands.games.Hangman.hangmangame import HangmanGuessButton  # local import to avoid cycles
-                btn = HangmanGuessButton(guess_value.lower())
-                await btn.callback(interaction)
-            else:
-                await interaction.followup.send(
-                    "Word guesses are not supported via this command yet. Use letter guesses (A-Z).",
-                    ephemeral=False,
-                )
+            from commands.games.Hangman.hangman_guess_letter import guess_letter  # local import
+            await guess_letter(interaction, guess_value)
+
         except Exception as e:
             logger.debug("Guess failed | error=%s", e)
             if not interaction.response.is_done():
