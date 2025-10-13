@@ -105,29 +105,19 @@ class HangmanGameHandler:
             return
 
         # Ongoing state: update message in place
+        from commands.games.Hangman.hangman_globals import HANGMAN_STAGES  # local import
+        stage_index = min(game.wrong_guesses, len(HANGMAN_STAGES) - 1)
+        hangman_visual = HANGMAN_STAGES[stage_index]
         embed = discord.Embed(
             title="Hangman",
-            description=game.format_board(),
+            description=f"{game.format_board()}\n```\n{hangman_visual}\n```",
             color=discord.Color.blue(),
         )
-        from commands.games.Hangman.hangmangame import make_view  # local import
-
-        view = await make_view(game, disable_inputs=False)
         try:
             if not interaction.response.is_done():
-                await interaction.response.edit_message(embed=embed, view=view)
+                await interaction.response.edit_message(embed=embed, view=None)
             else:
-                sent = False
-                try:
-                    if game.thread_id and interaction.guild:
-                        thread = interaction.guild.get_thread(game.thread_id)
-                        if thread:
-                            await thread.send(embed=embed, view=view)
-                            sent = True
-                except Exception:
-                    pass
-                if not sent:
-                    await interaction.followup.send(embed=embed, view=view, ephemeral=False)
+                await interaction.followup.send(embed=embed, ephemeral=False)
         except discord.errors.InteractionResponded:
             pass
         finally:

@@ -571,13 +571,12 @@ class HangmanGameManager(commands.Cog, name="HangmanGame"):
             description=f"You guessed the word: `{game.secret_word}`\n\n{game.format_board()}\n\n*This channel will be deleted in 30 seconds.*",
             color=discord.Color.green(),
         )
-        view = await make_view(game, disable_inputs=True)
-
+        # No buttons; guessing is via command
         try:
             if not interaction.response.is_done():
-                await interaction.response.edit_message(embed=embed, view=view)
+                await interaction.response.edit_message(embed=embed, view=None)
             else:
-                await interaction.followup.send(embed=embed, view=view, ephemeral=False)
+                await interaction.followup.send(embed=embed, ephemeral=False)
         except Exception as e:
             logger.error(f"Failed to send win embed: {e}")
 
@@ -616,13 +615,12 @@ class HangmanGameManager(commands.Cog, name="HangmanGame"):
             description=f"The word was: `{game.secret_word}`\n\n{game.format_board()}\n\n*This channel will be deleted in 30 seconds.*",
             color=discord.Color.red(),
         )
-        view = await make_view(game, disable_inputs=True)
-
+        # No buttons; guessing is via command
         try:
             if not interaction.response.is_done():
-                await interaction.response.edit_message(embed=embed, view=view)
+                await interaction.response.edit_message(embed=embed, view=None)
             else:
-                await interaction.followup.send(embed=embed, view=view, ephemeral=False)
+                await interaction.followup.send(embed=embed, ephemeral=False)
         except Exception as e:
             logger.error(f"Failed to send loss embed: {e}")
 
