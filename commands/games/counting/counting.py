@@ -400,8 +400,9 @@ class CountingGame(commands.Cog, name="CountingGame"):
 
             else:
                 # Public announcement in counting channel - simple and clear
-                adjustment = correction_data['correction_applied']
-                direction = "increased" if adjustment > 0 else "decreased"
+                previous = correction_data['previous_number']
+                current = correction_data['current_number']
+                direction = "increased" if current > previous else "decreased"
 
                 embed = discord.Embed(
                     title="🔧 Counting Game Correction",
