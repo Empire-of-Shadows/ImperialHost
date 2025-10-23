@@ -21,7 +21,6 @@ logger = get_logger("TicTacToeGameManager")
 
 load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI")
-MONGO_URI2 = os.getenv("MONGO_URI2")
 
 # Global cache reference initialized to avoid NameError before it's set via set_tictactoe_cache()
 master_cache: Optional[MasterCache] = None
@@ -216,7 +215,6 @@ class TicTacToeGameManager(commands.Cog, name="TicTacToeGame"):
 
         # DB/Cache lifecycle (moved from previous TicTacToeCog)
         self.db_client: Optional[AsyncIOMotorClient] = None
-        self.db_client2: Optional[AsyncIOMotorClient] = None
         self.state = None
         self.leaderboard = None
         self.ttt_cache: Optional[MasterCache] = None
@@ -846,8 +844,6 @@ class TicTacToeGameManager(commands.Cog, name="TicTacToeGame"):
             # Database connections
             logger.info("Connecting to MongoDB...")
             self.db_client = AsyncIOMotorClient(MONGO_URI)
-            self.db_client2 = AsyncIOMotorClient(MONGO_URI2) if MONGO_URI2 else None
-            startup["mongo_connections"] = 1 + (1 if self.db_client2 else 0)
             logger.info("✅ MongoDB client(s) initialized")
 
             # Bind collections for TicTacToe
@@ -949,8 +945,6 @@ class TicTacToeGameManager(commands.Cog, name="TicTacToeGame"):
             # Close DB connections
             if self.db_client:
                 self.db_client.close()
-            if self.db_client2:
-                self.db_client2.close()
             logger.info("🏁 TicTacToeGameManager cog unloaded.")
 
 

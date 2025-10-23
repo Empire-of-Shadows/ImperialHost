@@ -17,7 +17,6 @@ from utilities.logger_setup import get_logger, log_performance, PerformanceLogge
 # Load environment variables
 load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI")
-MONGO_URI2 = os.getenv("MONGO_URI2")
 
 logger = get_logger("CountingGame", level=logging.DEBUG)
 
@@ -29,7 +28,6 @@ class CountingGame(commands.Cog, name="CountingGame"):
         logger.info("Initializing CountingGame cog...")
         logger.debug("CountingGame.__init__()")
         self.db_client = None
-        self.db_client2 = None
 
         # Collections (assigned in cog_load)
         self.state = None
@@ -53,10 +51,10 @@ class CountingGame(commands.Cog, name="CountingGame"):
         self.idle_grace_seconds = config.idle_grace_seconds
         self.streak_protect_window = config.streak_protect_window
         self.max_digits = config.max_digits
-        logger.info(f"Configured counting channels: {self.count_channel_ids}")
+
         logger.info(f"Counting rules: double_post={self.double_post_grace_seconds}s, "
-                   f"idle={self.idle_grace_seconds}s, streak_window={self.streak_protect_window}, "
-                   f"max_digits={self.max_digits}")
+                    f"idle={self.idle_grace_seconds}s, streak_window={self.streak_protect_window}, "
+                    f"max_digits={self.max_digits}")
 
         self.user_cooldown = {}  # {channel_id: {user_id: timestamp}}
         self.channel_queues = {}  # {channel_id: asyncio.Queue}
@@ -66,6 +64,15 @@ class CountingGame(commands.Cog, name="CountingGame"):
         self.idle_tasks: dict[int, asyncio.Task] = {}
         self.idle_reactions = ["👀", "⏰", "🕒", "🧮", "🤖", "✨", "🔔", "🫠"]
         self.double_post_ready_tasks: dict[int, asyncio.Task] = {}
+
+        # Performance optimizations
+        self._leaderboard_cache = None
+        self._last_lb_update = 0
+        self._lb_cache_ttl = 30.0  # Cache leaderboard for 30 seconds
+
+        self.auto_verify_task = None
+        self.auto_verify_interval = 10
+
         logger.debug("CountingGame initialization completed")
 
     @log_performance("cog_load")
@@ -83,16 +90,14 @@ class CountingGame(commands.Cog, name="CountingGame"):
             # Database connections
             logger.info("Connecting to MongoDB...")
             self.db_client = AsyncIOMotorClient(MONGO_URI)
-            self.db_client2 = AsyncIOMotorClient(MONGO_URI2)
-            startup_metrics['mongo_connections'] = 2
+            startup_metrics['mongo_connections'] = 1
             logger.info("✅ MongoDB clients initialized successfully")
 
             # Collections
             logger.info("Binding collections...")
             self.state = self.db_client["Game-State"]["Counting"]
             self.LB = self.db_client["LeaderBoard"]["Counting"]
-            self.INVENTORY = self.db_client2["Ecom-Server"]["Inventory"]
-            startup_metrics['collections_bound'] = 3
+            startup_metrics['collections_bound'] = 2
             logger.info("✅ Collections bound successfully")
 
             # Initialize cache and background flush
@@ -135,6 +140,9 @@ class CountingGame(commands.Cog, name="CountingGame"):
             await self.create_indexes()
             startup_metrics['indexes_created'] = True
 
+            # Start automatic verification
+            await self.start_auto_verification()
+
             logger.info("🎉 CountingGame cog loaded successfully!")
             logger.info(f"Startup metrics: {startup_metrics}")
 
@@ -149,14 +157,12 @@ class CountingGame(commands.Cog, name="CountingGame"):
         try:
             indexes_created = []
 
-            await self.INVENTORY.create_index([("user_id", 1), ("item_name", 1)], unique=True)
-            indexes_created.append("user_id+item_name(unique)")
+            # Leaderboard indexes for new structure (one doc per user)
+            await self.LB.create_index([("user_id", 1)], unique=True)
+            indexes_created.append("user_id(unique)")
 
-            await self.INVENTORY.create_index("uses")
-            indexes_created.append("uses")
-
-            await self.INVENTORY.create_index("quantity")
-            indexes_created.append("quantity")
+            await self.LB.create_index([("count", -1)])
+            indexes_created.append("count(desc)")
 
             logger.info(f"✅ Successfully created {len(indexes_created)} indexes: {', '.join(indexes_created)}")
         except Exception as e:
@@ -173,7 +179,7 @@ class CountingGame(commands.Cog, name="CountingGame"):
         }
 
         try:
-            # cancel idle timers
+            # Cancel idle timers
             logger.info("Cancelling idle tasks...")
             for ch_id, task in list(self.idle_tasks.items()):
                 if not task.done():
@@ -182,7 +188,7 @@ class CountingGame(commands.Cog, name="CountingGame"):
                     cleanup_metrics['idle_tasks_cancelled'] += 1
             self.idle_tasks.clear()
 
-            # cancel double-post timers
+            # Cancel double-post timers
             logger.info("Cancelling double-post tasks...")
             for ch_id, task in list(self.double_post_ready_tasks.items()):
                 if not task.done():
@@ -190,6 +196,9 @@ class CountingGame(commands.Cog, name="CountingGame"):
                     task.cancel()
                     cleanup_metrics['double_post_tasks_cancelled'] += 1
             self.double_post_ready_tasks.clear()
+
+            # Clear cache
+            self._leaderboard_cache = None
 
             # Shutdown cache
             if self.cache:
@@ -206,17 +215,13 @@ class CountingGame(commands.Cog, name="CountingGame"):
                 self.db_client.close()
                 cleanup_metrics['db_connections_closed'] += 1
                 logger.debug("Primary MongoDB client closed")
-            if self.db_client2:
-                self.db_client2.close()
-                cleanup_metrics['db_connections_closed'] += 1
-                logger.debug("Secondary MongoDB client closed")
 
             logger.info(f"🏁 CountingGame cog unloaded. Cleanup metrics: {cleanup_metrics}")
 
     async def get_cached_state(self, channel_id: int):
         logger.debug(f"get_cached_state(channel_id={channel_id})")
         try:
-            state = await self.cache.get_state(channel_id)  # type: ignore[union-attr]
+            state = await self.cache.get_state(channel_id)
             logger.debug(f"Retrieved state for channel {channel_id}: last_number={state.get('last_number', 'N/A')}")
             return state
         except Exception as e:
@@ -228,11 +233,445 @@ class CountingGame(commands.Cog, name="CountingGame"):
             f"save_cached_state(channel_id={channel_id}, keys={list(partial_update.keys()) if partial_update else []})")
         try:
             if partial_update:
-                await self.cache.update_state(channel_id, partial_update)  # type: ignore[union-attr]
+                await self.cache.update_state(channel_id, partial_update)
                 logger.debug(f"✅ State updated for channel {channel_id}")
         except Exception as e:
             logger.error(f"❌ Failed to save cached state for channel {channel_id}: {e}", exc_info=True)
             raise
+
+    # =========================================================================
+    # ADD VERIFICATION AND CORRECTION METHODS HERE (after existing methods)
+    # =========================================================================
+    @log_performance("verify_counting_state")
+    async def verify_counting_state(self, channel_id: int) -> dict:
+        """
+        Verify that the counting state matches the sum of all counts in leaderboard.
+        Returns verification results with discrepancies found.
+        """
+        logger.info(f"🔍 Verifying counting state for channel {channel_id}")
+
+        try:
+            # Get current state
+            state = await self.get_cached_state(channel_id)
+            current_number = state.get("last_number", 0)
+
+            # Calculate total counts from leaderboard
+            lb = await self.get_cached_leaderboard()
+            total_counts = sum(lb.values())
+
+            # Calculate expected current number (starts from 0, so total_counts should equal current_number)
+            expected_number = total_counts
+
+            discrepancy = current_number - expected_number
+            is_correct = discrepancy == 0
+
+            result = {
+                "channel_id": channel_id,
+                "current_number": current_number,
+                "total_counts": total_counts,
+                "expected_number": expected_number,
+                "discrepancy": discrepancy,
+                "is_correct": is_correct,
+                "user_counts": len(lb),
+                "verification_time": discord.utils.utcnow().isoformat()
+            }
+
+            logger.info(
+                f"📊 Verification result for channel {channel_id}: "
+                f"current={current_number}, expected={expected_number}, "
+                f"discrepancy={discrepancy}, correct={is_correct}"
+            )
+
+            return result
+
+        except Exception as e:
+            logger.error(f"❌ Verification failed for channel {channel_id}: {e}", exc_info=True)
+            raise
+
+    @log_performance("correct_counting_state")
+    async def correct_counting_state(self, channel_id: int, announcement_channel: discord.TextChannel = None) -> dict:
+        """
+        Correct the counting state to match the total leaderboard counts.
+        Returns correction details.
+        """
+        logger.info(f"🔧 Correcting counting state for channel {channel_id}")
+
+        try:
+            # Verify first to get the discrepancy
+            verification = await self.verify_counting_state(channel_id)
+
+            if verification["is_correct"]:
+                logger.info(f"✅ Channel {channel_id} is already correct, no correction needed")
+                return {
+                    **verification,
+                    "corrected": False,
+                    "correction_applied": 0,
+                    "message": "No correction needed - state is already correct"
+                }
+
+            # Calculate correction
+            total_counts = verification["total_counts"]
+            correction_needed = verification["discrepancy"]
+
+            # Apply correction by updating the state to match total counts
+            await self.save_cached_state(channel_id, {
+                "last_number": total_counts,
+                "last_user_id": verification.get("last_user_id"),  # Preserve last user if possible
+                "correction_applied": True,
+                "corrected_from": verification["current_number"],
+                "corrected_to": total_counts,
+                "correction_time": discord.utils.utcnow().isoformat()
+            })
+
+            # Force immediate cache flush to ensure correction is persisted
+            if self.cache:
+                await self.cache.flush_once()
+
+            # Verify correction was applied
+            post_correction = await self.verify_counting_state(channel_id)
+
+            result = {
+                **post_correction,
+                "corrected": True,
+                "correction_applied": correction_needed,
+                "previous_number": verification["current_number"],
+                "message": f"Corrected counting state from {verification['current_number']} to {total_counts}"
+            }
+
+            logger.info(
+                f"✅ Correction applied to channel {channel_id}: "
+                f"{verification['current_number']} → {total_counts} "
+                f"(adjustment: {correction_needed})"
+            )
+
+            # Send announcement to the counting channel itself so everyone sees it
+            # Get the bot instance to fetch the channel
+            from utilities.bot import bot  # Adjust import based on your bot structure
+            counting_channel = bot.get_channel(channel_id)
+            if counting_channel:
+                await self._announce_correction(counting_channel, result)
+                logger.info(f"📢 Correction announced in counting channel {channel_id}")
+            else:
+                logger.warning(f"❌ Could not find counting channel {channel_id} for announcement")
+
+            # Also send to admin channel if provided and it's different from counting channel
+            if announcement_channel and announcement_channel.id != channel_id:
+                await self._announce_correction(announcement_channel, result, is_admin=True)
+                logger.info(f"📢 Correction announced in admin channel {announcement_channel.id}")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"❌ Correction failed for channel {channel_id}: {e}", exc_info=True)
+            raise
+
+    async def _announce_correction(self, channel: discord.TextChannel, correction_data: dict, is_admin: bool = False):
+        """Announce state correction to a channel - different message for counting channel vs admin"""
+        try:
+            if is_admin:
+                # Admin announcement - detailed technical info
+                embed = discord.Embed(
+                    title="🔧 Counting State Correction Applied",
+                    color=discord.Color.orange(),
+                    timestamp=discord.utils.utcnow()
+                )
+
+                embed.add_field(
+                    name="Correction Details",
+                    value=(
+                        f"**Previous Number:** `{correction_data['previous_number']}`\n"
+                        f"**Corrected Number:** `{correction_data['current_number']}`\n"
+                        f"**Adjustment:** `{correction_data['correction_applied']}`\n"
+                        f"**Total User Counts:** `{correction_data['total_counts']}`"
+                    ),
+                    inline=False
+                )
+
+                embed.add_field(
+                    name="Verification",
+                    value=(
+                        f"**Users in Leaderboard:** `{correction_data['user_counts']}`\n"
+                        f"**Status:** `{'✅ Corrected' if correction_data['corrected'] else '❌ Failed'}`"
+                    ),
+                    inline=False
+                )
+
+                embed.set_footer(text="Automatic counting state verification")
+
+            else:
+                # Public announcement in counting channel - simple and clear
+                adjustment = correction_data['correction_applied']
+                direction = "increased" if adjustment > 0 else "decreased"
+
+                embed = discord.Embed(
+                    title="🔧 Counting Game Correction",
+                    color=discord.Color.gold(),
+                    timestamp=discord.utils.utcnow()
+                )
+
+                embed.add_field(
+                    name="Game State Updated",
+                    value=(
+                        f"The counting number has been {direction} to maintain game integrity.\n\n"
+                        f"**Previous Number:** `{correction_data['previous_number']}`\n"
+                        f"**New Current Number:** `{correction_data['current_number']}`\n\n"
+                        f"*Please continue counting from* `{correction_data['current_number'] + 1}`"
+                    ),
+                    inline=False
+                )
+
+                embed.set_footer(text="Automatic system correction applied")
+
+            await channel.send(embed=embed)
+            logger.info(f"📢 Correction announced in channel {channel.id} (admin: {is_admin})")
+
+        except Exception as e:
+            logger.error(f"❌ Failed to announce correction: {e}")
+
+    @log_performance("verify_and_auto_correct")
+    async def verify_and_auto_correct(self, channel_id: int, announcement_channel: discord.TextChannel = None) -> dict:
+        """
+        Combined verification and auto-correction in one method.
+        This is the main method to use for automatic verification.
+        """
+        logger.info(f"🔄 Verifying and auto-correcting channel {channel_id}")
+
+        try:
+            # First verify the state
+            verification = await self.verify_counting_state(channel_id)
+
+            # If incorrect, automatically correct it
+            if not verification["is_correct"]:
+                logger.info(f"🔄 Auto-correcting channel {channel_id} (discrepancy: {verification['discrepancy']})")
+                return await self.correct_counting_state(channel_id, announcement_channel)
+            else:
+                logger.info(f"✅ Channel {channel_id} is correct, no correction needed")
+                return {
+                    **verification,
+                    "corrected": False,
+                    "correction_applied": 0,
+                    "message": "No correction needed - state is correct"
+                }
+
+        except Exception as e:
+            logger.error(f"❌ Verify and auto-correct failed for channel {channel_id}: {e}", exc_info=True)
+            raise
+
+    @log_performance("verify_all_channels")
+    async def verify_all_channels(self, auto_correct: bool = True) -> dict:
+        """Verify counting state for all configured channels with optional auto-correction"""
+        logger.info(f"🔍 Verifying all {len(self.count_channel_ids)} counting channels (auto_correct: {auto_correct})")
+
+        results = {}
+        corrections_applied = []
+
+        for channel_id in self.count_channel_ids:
+            try:
+                if auto_correct:
+                    # Use the combined verify and auto-correct method
+                    result = await self.verify_and_auto_correct(channel_id)
+                    if result.get("corrected", False):
+                        corrections_applied.append({
+                            "channel_id": channel_id,
+                            "previous": result["previous_number"],
+                            "corrected": result["current_number"],
+                            "adjustment": result["correction_applied"]
+                        })
+                else:
+                    # Just verify without correcting
+                    result = await self.verify_counting_state(channel_id)
+
+                results[channel_id] = result
+
+            except Exception as e:
+                results[channel_id] = {
+                    "channel_id": channel_id,
+                    "error": str(e),
+                    "is_correct": False
+                }
+
+        # Summary
+        correct_channels = [cid for cid, result in results.items() if result.get("is_correct", False)]
+        incorrect_channels = [cid for cid, result in results.items() if
+                              not result.get("is_correct", False) and "error" not in result]
+        error_channels = [cid for cid, result in results.items() if "error" in result]
+
+        summary = {
+            "total_channels": len(self.count_channel_ids),
+            "correct_channels": len(correct_channels),
+            "incorrect_channels": len(incorrect_channels),
+            "error_channels": len(error_channels),
+            "corrections_applied": corrections_applied,
+            "auto_correct": auto_correct,
+            "results": results
+        }
+
+        logger.info(
+            f"📊 All channels verification complete: "
+            f"{len(correct_channels)} correct, {len(incorrect_channels)} incorrect, "
+            f"{len(error_channels)} errors, {len(corrections_applied)} corrections applied"
+        )
+
+        return summary
+
+    async def start_auto_verification(self):
+        """Start automatic periodic verification with auto-correction"""
+        if self.auto_verify_task and not self.auto_verify_task.done():
+            self.auto_verify_task.cancel()
+
+        async def auto_verify_loop():
+            while True:
+                try:
+                    await asyncio.sleep(self.auto_verify_interval)
+                    logger.info("🔄 Running automatic counting state verification with auto-correction")
+                    summary = await self.verify_all_channels(auto_correct=True)
+
+                    # Log summary for monitoring
+                    incorrect_count = summary['incorrect_channels'] + summary['error_channels']
+                    corrections_count = len(summary['corrections_applied'])
+
+                    if corrections_count > 0:
+                        logger.warning(
+                            f"⚠️ Auto-verification corrected {corrections_count} channels: "
+                            f"{', '.join(str(c['channel_id']) for c in summary['corrections_applied'])}"
+                        )
+                    elif incorrect_count > 0:
+                        logger.warning(
+                            f"⚠️ Auto-verification found {incorrect_count} problematic channels "
+                            f"(but auto-correction may have been disabled)"
+                        )
+
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error(f"❌ Auto-verification failed: {e}")
+
+        self.auto_verify_task = asyncio.create_task(auto_verify_loop())
+
+    # =========================================================================
+    # ADD ADMIN COMMANDS HERE (before event listeners)
+    # =========================================================================
+
+    @commands.hybrid_command(name="verify_counting", description="Verify counting state vs leaderboard totals")
+    @commands.has_permissions(administrator=True)
+    @log_performance("verify_counting_command")
+    async def verify_counting_command(self, ctx: commands.Context, channel: discord.TextChannel = None):
+        """Admin command to verify counting state"""
+        await ctx.defer()
+
+        try:
+            if channel and channel.id not in self.count_channel_ids:
+                await ctx.send("❌ That is not a counting channel.")
+                return
+
+            channels_to_check = [channel.id] if channel else self.count_channel_ids
+
+            embed = discord.Embed(
+                title="🔍 Counting State Verification",
+                color=discord.Color.blue(),
+                timestamp=discord.utils.utcnow()
+            )
+
+            for channel_id in channels_to_check:
+                result = await self.verify_counting_state(channel_id)
+
+                status = "✅ Correct" if result["is_correct"] else "❌ Incorrect"
+                embed.add_field(
+                    name=f"Channel {channel_id}",
+                    value=(
+                        f"**Status:** {status}\n"
+                        f"**Current:** `{result['current_number']}`\n"
+                        f"**Expected:** `{result['expected_number']}`\n"
+                        f"**Discrepancy:** `{result['discrepancy']}`\n"
+                        f"**Users:** `{result['user_counts']}`"
+                    ),
+                    inline=False
+                )
+
+            await ctx.send(embed=embed)
+
+        except Exception as e:
+            logger.error(f"❌ Verify command failed: {e}", exc_info=True)
+            await ctx.send(f"❌ Verification failed: {e}")
+
+    @commands.hybrid_command(name="correct_counting", description="Correct counting state to match leaderboard totals")
+    @commands.has_permissions(administrator=True)
+    @log_performance("correct_counting_command")
+    async def correct_counting_command(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Admin command to correct counting state"""
+        await ctx.defer()
+
+        try:
+            if channel.id not in self.count_channel_ids:
+                await ctx.send("❌ That is not a counting channel.")
+                return
+
+            # Perform correction with announcement in current channel
+            result = await self.correct_counting_state(channel.id, ctx.channel)
+
+            if result["corrected"]:
+                embed = discord.Embed(
+                    title="✅ Counting State Corrected",
+                    color=discord.Color.green(),
+                    description=result["message"]
+                )
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send("❌ No correction was needed or correction failed.")
+
+        except Exception as e:
+            logger.error(f"❌ Correct command failed: {e}", exc_info=True)
+            await ctx.send(f"❌ Correction failed: {e}")
+
+    @commands.hybrid_command(name="verify_all_counting", description="Verify all counting channels")
+    @commands.has_permissions(administrator=True)
+    @log_performance("verify_all_counting_command")
+    async def verify_all_counting_command(self, ctx: commands.Context):
+        """Admin command to verify all counting channels"""
+        await ctx.defer()
+
+        try:
+            summary = await self.verify_all_channels()
+
+            embed = discord.Embed(
+                title="🔍 All Counting Channels Verification",
+                color=discord.Color.blue(),
+                timestamp=discord.utils.utcnow()
+            )
+
+            embed.add_field(
+                name="Summary",
+                value=(
+                    f"**Total Channels:** `{summary['total_channels']}`\n"
+                    f"**✅ Correct:** `{summary['correct_channels']}`\n"
+                    f"**❌ Incorrect:** `{summary['incorrect_channels']}`\n"
+                    f"**⚠️ Errors:** `{summary['error_channels']}`"
+                ),
+                inline=False
+            )
+
+            # Show details for incorrect channels
+            incorrect_details = []
+            for channel_id, result in summary['results'].items():
+                if not result.get('is_correct', False) and 'error' not in result:
+                    incorrect_details.append(
+                        f"• <#{channel_id}>: `{result['current_number']}` → `{result['expected_number']}` "
+                        f"(off by {result['discrepancy']})"
+                    )
+
+            if incorrect_details:
+                embed.add_field(
+                    name="Incorrect Channels",
+                    value="\n".join(incorrect_details[:5]) +
+                          ("\n..." if len(incorrect_details) > 5 else ""),
+                    inline=False
+                )
+
+            await ctx.send(embed=embed)
+
+        except Exception as e:
+            logger.error(f"❌ Verify all command failed: {e}", exc_info=True)
+            await ctx.send(f"❌ Verification failed: {e}")
 
     async def check_number(self, message: discord.Message):
         if message.author.bot:
@@ -275,10 +714,11 @@ class CountingGame(commands.Cog, name="CountingGame"):
                 logger.info(f"📦 Batch processed {processed_count} messages for channel {channel_id}")
 
     def _is_valid_number_text(self, text: str) -> bool:
-        ok = bool(text) and 0 < len(text.strip()) <= self.max_digits and bool(ASCII_DIGITS_RE.fullmatch(text.strip()))
-        if not ok:
-            logger.debug(f"❌ Invalid number format: '{text}' (length: {len(text.strip()) if text else 0})")
-        return ok
+        """Optimized number validation"""
+        if not text or len(text.strip()) > self.max_digits:
+            return False
+        stripped = text.strip()
+        return bool(ASCII_DIGITS_RE.fullmatch(stripped))
 
     async def process_message(self, message: discord.Message):
         channel_id = message.channel.id
@@ -332,7 +772,7 @@ class CountingGame(commands.Cog, name="CountingGame"):
         mc_role = user.guild.get_role(self.master_counter_id)
         is_master_counter = bool(mc_role and mc_role in user.roles)
         effective_double_post_grace = (
-                    self.double_post_grace_seconds * 3) if is_master_counter else self.double_post_grace_seconds
+                self.double_post_grace_seconds * 3) if is_master_counter else self.double_post_grace_seconds
 
         within_double_post_grace = since_last >= effective_double_post_grace or since_last >= self.idle_grace_seconds
         within_streak_protect = current_time <= float(state.get("grace_until", 0.0))
@@ -347,7 +787,7 @@ class CountingGame(commands.Cog, name="CountingGame"):
 
         # Determine if double-post by same user is allowed right now
         double_post_allowed = (not is_same_user) or within_double_post_grace or (
-                    within_streak_protect and user_number == expected)
+                within_streak_protect and user_number == expected)
 
         # Out-of-order check with detailed reasoning
         if user_number != expected or not double_post_allowed:
@@ -379,10 +819,10 @@ class CountingGame(commands.Cog, name="CountingGame"):
         # Kick off fast, non-blocking verification + acknowledgement
         asyncio.create_task(self._post_acceptance_verification(message, user_number))
 
-        # Leaderboard/roles
-        await self.update_leaderboard(user_id)
-        await self.remove_out_of_order_role(user)
-        await self.update_master_counter_role(message.guild)
+        # Leaderboard/roles - non-blocking
+        asyncio.create_task(self.update_leaderboard(user_id))
+        asyncio.create_task(self.remove_out_of_order_role(user))
+        asyncio.create_task(self.update_master_counter_role(message.guild))
 
         # (re)start idle reaction timer
         self._cancel_idle_task(channel_id)
@@ -533,7 +973,7 @@ class CountingGame(commands.Cog, name="CountingGame"):
             try:
                 state = await self.get_cached_state(ch_id)
                 if int(state.get("last_message_id", 0)) == int(message.id) and \
-                   int(state.get("last_number", -1)) == int(user_number):
+                        int(state.get("last_number", -1)) == int(user_number):
                     return True
             except Exception as e:
                 logger.debug(f"Verification poll failed for ch {ch_id}, msg {message.id}: {e}")
@@ -562,7 +1002,6 @@ class CountingGame(commands.Cog, name="CountingGame"):
                 pass
         except (discord.Forbidden, discord.HTTPException) as e:
             logger.debug(f"Failed to send verification-failed notice for msg {message.id}: {e}")
-
 
     async def delete_message(self, message: discord.Message, warning: str):
         logger.info(
@@ -600,12 +1039,70 @@ class CountingGame(commands.Cog, name="CountingGame"):
 
     @log_performance("update_leaderboard")
     async def update_leaderboard(self, user_id: int):
+        """Update leaderboard with new one-document-per-user structure"""
         logger.debug(f"📊 Updating leaderboard for user {user_id}")
         try:
-            await self.cache.increment_leaderboard(user_id)  # type: ignore[union-attr]
-            logger.debug(f"✅ Leaderboard updated for user {user_id}")
+            # Use atomic increment for the new structure
+            result = await self.LB.update_one(
+                {"user_id": user_id},
+                {"$inc": {"count": 1}},
+                upsert=True
+            )
+
+            # Invalidate cached leaderboard
+            self._leaderboard_cache = None
+
+            if result.upserted_id:
+                logger.debug(f"✅ Created new leaderboard entry for user {user_id}")
+            else:
+                logger.debug(f"✅ Incremented leaderboard for user {user_id}")
+
         except Exception as e:
             logger.error(f"❌ Failed to update leaderboard for user {user_id}: {e}", exc_info=True)
+
+    async def get_cached_leaderboard(self) -> dict:
+        """Get leaderboard with local caching - adapted for new structure"""
+        now = asyncio.get_event_loop().time()
+        if (self._leaderboard_cache is None or
+                now - self._last_lb_update > self._lb_cache_ttl):
+            try:
+                # Query all user documents and convert to old format for compatibility
+                cursor = self.LB.find({})  # Get all documents
+                leaderboard_data = {}
+
+                async for doc in cursor:
+                    if "user_id" in doc and "count" in doc:
+                        leaderboard_data[str(doc["user_id"])] = doc["count"]
+
+                self._leaderboard_cache = leaderboard_data
+                self._last_lb_update = now
+                logger.debug(f"🔄 Leaderboard cache refreshed with {len(leaderboard_data)} users")
+            except Exception as e:
+                logger.error(f"❌ Failed to refresh leaderboard cache: {e}")
+        return self._leaderboard_cache or {}
+
+    async def get_user_count(self, user_id: int) -> int:
+        """Get a specific user's count directly from database"""
+        try:
+            doc = await self.LB.find_one({"user_id": user_id})
+            return doc.get("count", 0) if doc else 0
+        except Exception as e:
+            logger.error(f"❌ Failed to get count for user {user_id}: {e}")
+            return 0
+
+    async def get_top_users(self, limit: int = 10) -> list[tuple[int, int]]:
+        """Get top users efficiently using the count index"""
+        try:
+            cursor = self.LB.find({}).sort("count", -1).limit(limit)
+            top_users = []
+
+            async for doc in cursor:
+                top_users.append((doc["user_id"], doc["count"]))
+
+            return top_users
+        except Exception as e:
+            logger.error(f"❌ Failed to get top users: {e}")
+            return []
 
     async def handle_out_of_order(self, message: discord.Message, state: dict, channel_id: int, reason="Out of order!",
                                   now_ts: float | None = None):
@@ -657,12 +1154,14 @@ class CountingGame(commands.Cog, name="CountingGame"):
 
     @log_performance("update_master_counter_role")
     async def update_master_counter_role(self, guild: discord.Guild):
+        """Optimized master counter role update with caching"""
         logger.debug("👑 Updating master counter role...")
         try:
-            lb = await self.cache.get_leaderboard(include_pending=True)  # type: ignore[union-attr]
+            lb = await self.get_cached_leaderboard()
             if not lb:
                 logger.debug("❌ No leaderboard data available")
                 return
+
             sorted_leaderboard = sorted(lb.items(), key=lambda x: x[1], reverse=True)
             if not sorted_leaderboard:
                 logger.debug("❌ Empty sorted leaderboard")
@@ -679,21 +1178,23 @@ class CountingGame(commands.Cog, name="CountingGame"):
                 logger.warning(f"❌ Master counter role {self.master_counter_id} not found")
                 return
 
-            # Ensure only current top has the role
-            removed = 0
-            for member in role.members:
-                if member.id != top_user_id:
+            # Optimized role assignment - only modify if needed
+            current_members = set(member.id for member in role.members)
+            should_have_role = {top_user_id}
+
+            # Remove role from members who shouldn't have it
+            to_remove = current_members - should_have_role
+            for member_id in to_remove:
+                member = guild.get_member(member_id)
+                if member:
                     try:
                         await member.remove_roles(role, reason="No longer top counter")
-                        removed += 1
                         logger.debug(f"👑 Removed master role from {member.display_name}({member.id})")
                     except discord.Forbidden:
                         logger.warning(f"❌ Failed to remove master role from {member.id}: forbidden")
 
-            if removed:
-                logger.info(f"👑 Removed master counter role from {removed} members")
-
-            if role not in top_member.roles:
+            # Add role to top member if needed
+            if top_user_id not in current_members:
                 try:
                     await top_member.add_roles(role, reason="Became top counter")
                     logger.info(f"👑 Master counter role assigned to {top_member.display_name}({top_user_id})")

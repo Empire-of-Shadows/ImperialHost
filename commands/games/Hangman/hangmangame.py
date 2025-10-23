@@ -19,7 +19,6 @@ logger = get_logger("HangmanGameManager")
 # ---------------- Environment ----------------
 load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI")
-MONGO_URI2 = os.getenv("MONGO_URI2")
 
 # Global cache reference
 master_cache: Optional[MasterCache] = None
@@ -310,7 +309,6 @@ class HangmanGameManager(commands.Cog, name="HangmanGame"):
 
         # DB/Cache lifecycle
         self.db_client: Optional[AsyncIOMotorClient] = None
-        self.db_client2: Optional[AsyncIOMotorClient] = None
         self.state = None
         self.leaderboard = None
         self.hm_cache: Optional[MasterCache] = None
@@ -713,8 +711,6 @@ class HangmanGameManager(commands.Cog, name="HangmanGame"):
         try:
             logger.info("Connecting to MongoDB...")
             self.db_client = AsyncIOMotorClient(MONGO_URI)
-            self.db_client2 = AsyncIOMotorClient(MONGO_URI2) if MONGO_URI2 else None
-            startup["mongo_connections"] = 1 + (1 if self.db_client2 else 0)
 
             # Bind collections for Hangman
             self.state = self.db_client["Game-State"]["Hangman"]
@@ -793,8 +789,6 @@ class HangmanGameManager(commands.Cog, name="HangmanGame"):
         finally:
             if self.db_client:
                 self.db_client.close()
-            if self.db_client2:
-                self.db_client2.close()
             logger.info("HangmanGameManager cog unloaded.")
 
 
