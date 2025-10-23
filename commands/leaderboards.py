@@ -218,21 +218,17 @@ class Leaderboards(commands.Cog, name="Leaderboards"):
         guild_only=True,
     )
 
-    # Lightweight per-guild cooldown to protect the cache/source
-    @leaderboard.command(name="counting", description="Show the counting leaderboard from cache")
-    @app_commands.checks.cooldown(1, 3.0, key=lambda i: i.guild_id or i.user.id)  # 1 use per 3s per guild
+    @leaderboard.command(name="counting", description="Show the counting leaderboard")
+    @app_commands.checks.cooldown(1, 3.0, key=lambda i: i.guild_id or i.user.id)
     @app_commands.describe(
         top="How many users to display (1-50)",
-        include_pending="Include unflushed increments for freshest results",
     )
     @log_performance("leaderboard.counting")
     async def counting(
-        self,
-        interaction: discord.Interaction,
-        top: app_commands.Range[int, 1, 50] = 10,
-        include_pending: bool = True,
+            self,
+            interaction: discord.Interaction,
+            top: app_commands.Range[int, 1, 50] = 10,
     ):
-        # Helper to edit if deferred, otherwise send ephemeral error
         async def respond_error(msg: str):
             try:
                 if interaction.response.is_done():
@@ -242,29 +238,35 @@ class Leaderboards(commands.Cog, name="Leaderboards"):
             except Exception:
                 logger.exception("Failed to send error response")
 
-        # Defer early to avoid the 3s limit
         try:
             if not interaction.response.is_done():
                 await interaction.response.defer(thinking=True)
         except Exception:
             logger.debug("Defer failed or already responded")
 
-        with log_context(logger, f"leaderboard.counting top={top} include_pending={include_pending}"):
-            cache = self._get_cache()
-            if not cache:
-                logger.info("Counting cache unavailable; responding with notice")
-                await respond_error("Counting cache is not available yet. Please try again shortly.")
-                return
-
+        with log_context(logger, f"leaderboard.counting top={top}"):
             try:
-                lb: Dict[str, int] = await cache.get_leaderboard(include_pending=include_pending)
-                logger.debug("Fetched leaderboard entries: %d", len(lb))
+                # Get the counting game cog instance
+                counting_cog = interaction.client.get_cog("CountingGame")
+                if not counting_cog:
+                    logger.error("CountingGame cog not found")
+                    await respond_error("Counting game is not available. Please try again later.")
+                    return
+
+                # Direct database query for top users - much more efficient!
+                top_users = await counting_cog.get_top_users(limit=top)
+
+                # Convert to the expected format: list of (user_id_str, count) tuples
+                top_items = [(str(user_id), count) for user_id, count in top_users]
+
+                logger.info("Fetched top %d users directly from database", len(top_items))
+
             except Exception:
                 logger.exception("Failed to read leaderboard")
                 await respond_error("Failed to read leaderboard. Please try again later.")
                 return
 
-            if not lb:
+            if not top_items:
                 logger.info("Empty leaderboard")
                 empty_msg = "The counting leaderboard is empty."
                 if interaction.response.is_done():
@@ -273,9 +275,6 @@ class Leaderboards(commands.Cog, name="Leaderboards"):
                     await interaction.response.send_message(empty_msg, ephemeral=True)
                 return
 
-            # Sort: highest score first, then by user id (stable order)
-            sorted_items = sorted(lb.items(), key=lambda kv: (-kv[1], int(kv[0])))
-            top_items = sorted_items[:top]
             logger.info("Preparing leaderboard response with top=%d", len(top_items))
 
             if len(top_items) <= 10:
