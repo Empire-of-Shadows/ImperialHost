@@ -71,7 +71,7 @@ class CountingGame(commands.Cog, name="CountingGame"):
         self._lb_cache_ttl = 30.0  # Cache leaderboard for 30 seconds
 
         self.auto_verify_task = None
-        self.auto_verify_interval = 10
+        self.auto_verify_interval = config.auto_verify_interval
 
         logger.debug("CountingGame initialization completed")
 
@@ -548,131 +548,6 @@ class CountingGame(commands.Cog, name="CountingGame"):
                     logger.error(f"❌ Auto-verification failed: {e}")
 
         self.auto_verify_task = asyncio.create_task(auto_verify_loop())
-
-    # =========================================================================
-    # ADD ADMIN COMMANDS HERE (before event listeners)
-    # =========================================================================
-
-    @commands.hybrid_command(name="verify_counting", description="Verify counting state vs leaderboard totals")
-    @commands.has_permissions(administrator=True)
-    @log_performance("verify_counting_command")
-    async def verify_counting_command(self, ctx: commands.Context, channel: discord.TextChannel = None):
-        """Admin command to verify counting state"""
-        await ctx.defer()
-
-        try:
-            if channel and channel.id not in self.count_channel_ids:
-                await ctx.send("❌ That is not a counting channel.")
-                return
-
-            channels_to_check = [channel.id] if channel else self.count_channel_ids
-
-            embed = discord.Embed(
-                title="🔍 Counting State Verification",
-                color=discord.Color.blue(),
-                timestamp=discord.utils.utcnow()
-            )
-
-            for channel_id in channels_to_check:
-                result = await self.verify_counting_state(channel_id)
-
-                status = "✅ Correct" if result["is_correct"] else "❌ Incorrect"
-                embed.add_field(
-                    name=f"Channel {channel_id}",
-                    value=(
-                        f"**Status:** {status}\n"
-                        f"**Current:** `{result['current_number']}`\n"
-                        f"**Expected:** `{result['expected_number']}`\n"
-                        f"**Discrepancy:** `{result['discrepancy']}`\n"
-                        f"**Users:** `{result['user_counts']}`"
-                    ),
-                    inline=False
-                )
-
-            await ctx.send(embed=embed)
-
-        except Exception as e:
-            logger.error(f"❌ Verify command failed: {e}", exc_info=True)
-            await ctx.send(f"❌ Verification failed: {e}")
-
-    @commands.hybrid_command(name="correct_counting", description="Correct counting state to match leaderboard totals")
-    @commands.has_permissions(administrator=True)
-    @log_performance("correct_counting_command")
-    async def correct_counting_command(self, ctx: commands.Context, channel: discord.TextChannel):
-        """Admin command to correct counting state"""
-        await ctx.defer()
-
-        try:
-            if channel.id not in self.count_channel_ids:
-                await ctx.send("❌ That is not a counting channel.")
-                return
-
-            # Perform correction with announcement in current channel
-            result = await self.correct_counting_state(channel.id, ctx.channel)
-
-            if result["corrected"]:
-                embed = discord.Embed(
-                    title="✅ Counting State Corrected",
-                    color=discord.Color.green(),
-                    description=result["message"]
-                )
-                await ctx.send(embed=embed)
-            else:
-                await ctx.send("❌ No correction was needed or correction failed.")
-
-        except Exception as e:
-            logger.error(f"❌ Correct command failed: {e}", exc_info=True)
-            await ctx.send(f"❌ Correction failed: {e}")
-
-    @commands.hybrid_command(name="verify_all_counting", description="Verify all counting channels")
-    @commands.has_permissions(administrator=True)
-    @log_performance("verify_all_counting_command")
-    async def verify_all_counting_command(self, ctx: commands.Context):
-        """Admin command to verify all counting channels"""
-        await ctx.defer()
-
-        try:
-            summary = await self.verify_all_channels()
-
-            embed = discord.Embed(
-                title="🔍 All Counting Channels Verification",
-                color=discord.Color.blue(),
-                timestamp=discord.utils.utcnow()
-            )
-
-            embed.add_field(
-                name="Summary",
-                value=(
-                    f"**Total Channels:** `{summary['total_channels']}`\n"
-                    f"**✅ Correct:** `{summary['correct_channels']}`\n"
-                    f"**❌ Incorrect:** `{summary['incorrect_channels']}`\n"
-                    f"**⚠️ Errors:** `{summary['error_channels']}`"
-                ),
-                inline=False
-            )
-
-            # Show details for incorrect channels
-            incorrect_details = []
-            for channel_id, result in summary['results'].items():
-                if not result.get('is_correct', False) and 'error' not in result:
-                    incorrect_details.append(
-                        f"• <#{channel_id}>: `{result['current_number']}` → `{result['expected_number']}` "
-                        f"(off by {result['discrepancy']})"
-                    )
-
-            if incorrect_details:
-                embed.add_field(
-                    name="Incorrect Channels",
-                    value="\n".join(incorrect_details[:5]) +
-                          ("\n..." if len(incorrect_details) > 5 else ""),
-                    inline=False
-                )
-
-            await ctx.send(embed=embed)
-
-        except Exception as e:
-            logger.error(f"❌ Verify all command failed: {e}", exc_info=True)
-            await ctx.send(f"❌ Verification failed: {e}")
 
     async def check_number(self, message: discord.Message):
         if message.author.bot:
