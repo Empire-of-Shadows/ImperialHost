@@ -160,6 +160,22 @@ class SettingsUpdate:
             logger.error(f"Failed to update {channel_type}_channel_id: {e}", exc_info=True)
             raise
 
+    def update_auto_verify_interval(self, interval: int):
+        """Update auto-verify interval in seconds"""
+        logger.info(f"Updating auto_verify_interval to: {interval} seconds")
+        try:
+            # Validate the input
+            if not isinstance(interval, int) or interval <= 0:
+                raise ValueError("Interval must be a positive integer")
+
+            self._values["auto_verify_interval"] = interval
+            self.save_config()
+            self._notify_callbacks()
+            logger.info(f"Successfully updated auto_verify_interval to {interval} seconds")
+        except Exception as e:
+            logger.error(f"Failed to update auto_verify_interval: {e}", exc_info=True)
+            raise
+
     # ===========================================
     # Game Settings Update Methods
     # ===========================================

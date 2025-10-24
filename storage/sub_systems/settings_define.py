@@ -85,3 +85,12 @@ class SettingsDefine:
             description="Maximum number of digits allowed in counts",
             validator=lambda x: isinstance(x, int) and 1 <= x <= 50
         )
+
+        # Auto-verify interval setting
+        self._config_definitions["auto_verify_interval"] = ConfigDefinition(
+            name="auto_verify_interval",
+            type=int,
+            default=3600,
+            description="Auto-verify interval in seconds",
+            validator=lambda x: isinstance(x, int) and x > 0
+        )

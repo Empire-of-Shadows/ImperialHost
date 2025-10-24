@@ -210,6 +210,11 @@ class BotConfig(SettingsValidater, SettingsDefine, SettingsUpdate):
         return set(channel_ids)
 
     @property
+    def auto_verify_interval(self) -> int:
+        """Get auto-verify interval in seconds"""
+        return self._values.get("auto_verify_interval", 3600)
+
+    @property
     def out_of_order_role_id(self) -> int:
         """Get out of order role ID"""
         return self._values.get("out_of_order_role_id", 1375629700809887948)
