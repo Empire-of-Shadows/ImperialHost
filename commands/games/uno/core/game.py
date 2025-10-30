@@ -642,7 +642,7 @@ class UnoGameManager:
                     game["direction"] *= -1  # Reverse the direction
                     logger.info(f"Turn direction reversed. New direction: {game['direction']}.")
 
-                    game["current_player_index"] = (game["current_player_index"] + game["direction"]) % len(
+                    game["turn_index"] = (game["turn_index"] + game["direction"]) % len(
                         game["players"])
 
                     await asyncio.sleep(.5)
