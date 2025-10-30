@@ -164,13 +164,13 @@ class UnoGameManager:
             pinned_message = await channel.send(
                 "**🎮 UNO Game Setup Complete!**\n\n"
                 "**🃏 Game Commands:**\n"
-                "> `/new_uno_game` – Start a new UNO game\n"
-                "> `/start_game` – Begin the match\n"
-                "> `/play_card` – Play your card\n"
-                "> `/draw_card` – Draw a new card\n"
-                "> `/pass_turn` – Skip your turn\n"
-                "> `/call_uno` – Call UNO when you’re down to 2 cards\n"
-                "> `/declare_uno` – Declare UNO\n"
+                "> `/uno new_game` – Start a new UNO game\n"
+                "> `/uno start_game` – Begin the match\n"
+                "> `/uno play` – Play your card\n"
+                "> `/uno draw` – Draw a new card\n"
+                "> `/uno pass` – Skip your turn\n"
+                "> `/uno call` – Call uno on a player\n"
+                "> `/uno declare` – Declare UNO when you have 2 cards or less while its your turn\n"
                 "> `/cancel_game` – Cancel the ongoing game\n\n"
                 "**📜 Game Rules:**\n"
                 "🔹 Match cards by **color** or **value**.\n"
@@ -979,7 +979,7 @@ class UnoGameManager:
                 return await interaction.followup.send("❌ You are not part of this game.", ephemeral=True)
 
             # Validate the number of cards in the player's hand
-            if len(player.hand) != 2:
+            if len(player.hand) <= 2:
                 logger.info(f"User {interaction.user} attempted to declare UNO with {len(player.hand)} cards in hand.")
                 return await interaction.followup.send(
                     "❌ You can only call UNO when you have exactly 2 cards left!", ephemeral=True
