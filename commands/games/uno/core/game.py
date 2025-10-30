@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import discord
 from discord.ui import Button, View
 from commands.games.uno.utils.valid_card_check import can_play_card
+from storage.config_system import config
 from utilities.timers import get_10_min_countdown_timestamp, get_1_min_countdown_timestamp
 from commands.games.uno.core.cards import CardDeck
 from commands.games.uno.core.player import Player
@@ -50,11 +51,21 @@ class UnoGameManager:
                 logger.warning(f"Error serializing object: {e}")
             return str(obj)  # Fallback for anything else
 
-        # Fetch the "Games" category from the guild
-        games_category = discord.utils.get(interaction.guild.categories, name="Server Games")
-        if not games_category:
-            logger.error("'Games' category not found in the guild.")
-            return await interaction.followup.send("❌ The 'Games' category does not exist!", ephemeral=True)
+        # Fetch the games category from the guild by ID
+        try:
+            games_category = await interaction.guild.fetch_channel(config.game_category_id)
+            if not isinstance(games_category, discord.CategoryChannel):
+                logger.error(f"Channel with ID {config.game_category_id} is not a category channel.")
+                return await interaction.followup.send("❌ The configured games category ID is not a valid category!", ephemeral=True)
+        except discord.NotFound:
+            logger.error(f"Games category with ID {config.game_category_id} not found.")
+            return await interaction.followup.send("❌ The games category does not exist!", ephemeral=True)
+        except discord.Forbidden:
+            logger.error(f"No permission to access category with ID {config.game_category_id}.")
+            return await interaction.followup.send("❌ Bot doesn't have permission to access the games category!", ephemeral=True)
+        except discord.HTTPException as e:
+            logger.error(f"Error fetching category {config.game_category_id}: {e}")
+            return await interaction.followup.send("❌ Error accessing the games category!", ephemeral=True)
 
         # Check if the user already has an active game
         existing_game = next((game for game in UnoGameManager.uno_games.values() if game["owner"] == interaction.user),
